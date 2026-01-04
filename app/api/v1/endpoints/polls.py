@@ -25,10 +25,12 @@ async def vote(poll_id: str, vote_req: VoteRequest):
 
 @router.get("/results/{poll_id}", response_model=PollResults)
 async def get_results(poll_id: str):
-    results = await service.get_results(poll_id)
-    served_via = "unknown"  # TODO: determine how & where to get this info from
-    return PollResults(
-        poll_id=poll_id,
-        results=results,
-        served_via=served_via
-    )
+    try:
+        results, served_via = await service.get_results_with_source(poll_id)
+        return PollResults(
+            poll_id=poll_id,
+            results=results,
+            served_via=served_via
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
