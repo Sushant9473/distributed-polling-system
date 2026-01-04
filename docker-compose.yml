@@ -1,0 +1,32 @@
+services:
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      # We have 2 redis instances declared here. The second one will be useful for Task 5 (Sharding)
+      - REDIS_NODES=redis://redis-node-1:6379,redis://redis-node-2:6379
+      - DEBUG=true
+    depends_on:
+      - redis-node-1
+      - redis-node-2
+
+  redis-node-1:
+    image: redis:8.4.0
+    ports:
+      - "7000:6379" # Mapped to host port 7000
+    volumes:
+      - redis1_data:/data
+    command: redis-server --appendonly yes
+
+  redis-node-2:
+    image: redis:8.4.0
+    ports:
+      - "7001:6379" # Mapped to host port 7001
+    volumes:
+      - redis2_data:/data
+    command: redis-server --appendonly yes
+
+volumes:
+  redis1_data:
+  redis2_data:
