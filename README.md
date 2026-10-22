@@ -1,89 +1,110 @@
 # Distributed Live Polling System
 
-This is the starter codebase for the "Distributed Live Polling System" assignment.
+A backend for real-time voting (like live polls during a TV show), built with **FastAPI**, **Redis** and **Docker Compose**.
 
-You will implement a high-throughput backend service using FastAPI, Redis, and Docker, simulating a real-time voting platform for live events.
+- Votes are **buffered in memory and flushed to Redis in batches**.
+- Results are served through a **short-lived application cache**.
+- Polls are **sharded across two Redis nodes** using a custom **consistent hashing** ring.
 
-## Architecture Overview
+> Built as a course assignment at Scaler School of Technology (see `ASSIGNMENT.md`). The FastAPI app skeleton and `docker-compose.yml` were provided. I wrote the consistent hashing, sharding, caching and batching logic.
 
-The system consists of the following components:
-
-1. **FastAPI Application:** Handles HTTP requests (`POST /vote`, `GET /results`).
-2. **Redis Cluster _(Simulated)_:** Two distinct Redis instances (ports 7000, 7001) to demonstrate sharding.
-3. **Consistent Hashing:** A custom implementation to distribute Poll IDs across Redis nodes.
-4. **Batch Processing:** A background worker to aggregate votes in memory before flushing to Redis.
-
-## Prerequisites
-
-- Docker & Docker Compose
-- Python 3.14+ (if running locally without Docker)
-- Postman (or `curl`) for testing
-
-## Setup Instructions
-
-1. Clone this repository
-    ```bash
-    git clone https://github.com/AgarwalPragy/distributed-live-polling-system.git
-   cd distributed-live-polling-system && ls -la
-    ```
-2. Start the infrastructure:
-    ```bash
-    docker compose up --build
-    ```
-    This will start:
-    - The API server at http://localhost:8000
-    - Redis Node 1 at `localhost:7000`
-    - Redis Node 2 at `localhost:7001`
-
-3. Verify Health:
-    Visit http://localhost:8000/ to see
-    ```json
-    {"status": "healthy"}
-   ```
-
-## Project Structure
+## Architecture
 
 ```
-.
-├── app/
-│   ├── api/v1/endpoints/      # API Route definitions
-│   ├── core/
-│   │   ├── config.py          # Settings (Redis URLs, Batch intervals)
-│   │   ├── consistent_hash.py # TODO: Implement Ring Topology here
-│   │   └── redis_manager.py   # TODO: Implement Sharding logic here
-│   ├── services/
-│   │   └── polling_service.py # TODO: Implement Caching & Batching here
-│   └── main.py                # App entry point
-├── docker-compose.yml         # Defines Redis shards and App container
-├── Dockerfile
-└── requirements.txt
+                         ┌──────────────────────── FastAPI app (:8000) ────────────────────────┐
+POST /vote/{poll_id} ──▶ │ in-memory vote buffer ──(background task, every 10 s)──▶ HINCRBY ───┼──┐
+                         │                                                                     │  │
+GET /results/{poll_id} ─▶│ app cache (5 s TTL) ──miss──▶ HGETALL ──────────────────────────────┼──┤
+                         │      + pending buffer counts                                        │  │
+                         └─────────────────────────────────────────────────────────────────────┘  │
+                                         consistent hash ring: poll_id ──▶ Redis node             │
+                                                                                                  ▼
+                                                              redis-node-1 (:7000)   redis-node-2 (:7001)
 ```
 
-## Quick Start Testing
+Both Redis nodes run with AOF persistence (`--appendonly yes`) and Docker volumes, so votes survive restarts.
 
-You can interact with the API using `curl`:
+## How it works
+
+### Write path: write-behind batching
+1. `POST /api/v1/vote/{poll_id}` only increments a counter in an in-memory buffer. There is no Redis call on the request path.
+2. The vote also invalidates that poll's cached results.
+3. A background task, started when the app starts, runs every 10 seconds (`BATCH_INTERVAL_SECONDS`). For each buffered poll it:
+   - finds the poll's Redis node on the hash ring,
+   - runs `HINCRBY poll:{poll_id} {option} {count}`,
+   - clears the buffer.
+
+   After the flush, the results cache is cleared.
+
+### Read path: application cache
+1. `GET /api/v1/results/{poll_id}` first checks an in-memory cache with a 5-second TTL. A hit returns `served_via: "app_cache"`.
+2. On a miss, it reads `HGETALL poll:{poll_id}` from the poll's Redis node and caches the result. That returns `served_via: "redis_7000"` or `"redis_7001"`.
+3. In both cases, votes still waiting in the buffer are added on top, so results include unflushed votes.
+
+### Sharding: consistent hashing
+- `app/core/consistent_hash.py` places each Redis node on a ring **100 times** (virtual nodes), using the MD5 hash of `"{node}:{i}"`.
+- A poll is routed by hashing its `poll_id` and taking the first virtual node clockwise. This is a binary search with `bisect_right` that wraps around to the start of the ring.
+- Virtual nodes spread polls evenly across nodes. Adding a node only remaps the polls in that node's ranges. With `hash(poll_id) % N`, almost every poll would move.
+
+### Data model
+One Redis **hash** per poll: key `poll:{poll_id}`, field = option id, value = vote count.
+
+## Trade-offs
+- **A crash can lose up to 10 s of votes.** That's the price of write-behind batching, which in return cuts Redis writes dramatically.
+- **The buffer and cache live inside one process.** The design assumes a single app instance. With several instances, each would hold its own pending votes.
+- **No rebalancing.** Adding a Redis node changes where some polls are routed, but their existing data isn't migrated.
+
+## API
+
+| Method | Endpoint | Body | Response |
+|---|---|---|---|
+| `GET` | `/` | – | `{"status": "healthy"}` |
+| `POST` | `/api/v1/vote/{poll_id}` | `{"option_id": "A"}` | `{"status": "success", "message": "Vote accepted"}` |
+| `GET` | `/api/v1/results/{poll_id}` | – | `{"poll_id": "100", "results": {"A": 3}, "served_via": "app_cache"}` |
+
+## Running it
+
+Prerequisite: Docker & Docker Compose.
 
 ```bash
-# Cast a vote (Option 'A' in Poll '100')
+git clone https://github.com/Sushant9473/distributed-polling-system.git
+cd distributed-polling-system
+docker compose up --build
+```
+
+This starts the API at http://localhost:8000 and the Redis nodes at `localhost:7000` and `localhost:7001`.
+
+## Trying it
+
+```bash
+# Cast a vote (option A in poll 100)
 curl -X POST http://localhost:8000/api/v1/vote/100 \
   -H "Content-Type: application/json" \
   -d '{"option_id": "A"}'
 
-# Get Results
+# Get results
 curl http://localhost:8000/api/v1/results/100
 ```
 
-## Debugging
+To watch batching happen, cast a vote and check Redis straight away: the count hasn't changed yet. Check again after 10 seconds and it has.
 
-- **Logs:** The docker container streams logs to stdout. Watch them to see when the batch flushes occur:
-    ```bash
-    docker logs -f distributed_live_polling_system-app-1
-    ```
-- **Redis CLI:** You can inspect specific shards directly to verify data distribution.
-    ```bash
-    # Check Node 1 (Port 7000)
-    docker exec -it distributed_live_polling_system-redis-node-1-1 redis-cli keys "*"
+```bash
+docker compose exec redis-node-1 redis-cli keys "*"
+docker compose exec redis-node-2 redis-cli keys "*"
+```
 
-    # Check Node 2 (Port 7001)
-    docker exec -it distributed_live_polling_system-redis-node-2-1 redis-cli keys "*"
-    ```
+## Project structure
+
+```
+app/
+├── api/v1/endpoints/polls.py   # Routes; starts the batch-flush task on startup
+├── core/
+│   ├── config.py               # Settings (Redis nodes, virtual nodes, batch interval)
+│   ├── consistent_hash.py      # Hash ring with virtual nodes
+│   └── redis_manager.py        # One client per Redis node; routes poll_id to its node
+├── schemas/poll.py             # Request/response models
+├── services/polling_service.py # Vote buffer, results cache, batch flush
+└── main.py                     # App entry point + health check
+docker-compose.yml              # App + two Redis nodes
+Dockerfile
+```
