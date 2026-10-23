@@ -110,21 +110,20 @@ class PollingService:
             
             # Flush _memory_storage to Redis
             if self._memory_storage:
-                # Create a copy to avoid modification during iteration
-                polls_to_flush = dict(self._memory_storage)
-                
+                # Swap in a fresh buffer before any await, so votes cast
+                # during the flush go to the new buffer instead of being cleared
+                polls_to_flush = self._memory_storage
+                self._memory_storage = defaultdict(lambda: defaultdict(int))
+
                 for poll_id, options in polls_to_flush.items():
                     if options:
                         client = await self.redis_manager.get_client(poll_id)
                         redis_key = f"poll:{poll_id}"
-                        
+
                         # Increment each option count in Redis
                         for option, count in options.items():
                             if count > 0:
                                 await client.hincrby(redis_key, option, count)
-                        
-                        # Clear the buffer for this poll
-                        self._memory_storage[poll_id].clear()
                 
                 # Invalidate app cache after flushing (data has changed in Redis)
                 self._app_cache.clear()
