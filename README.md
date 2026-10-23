@@ -28,8 +28,7 @@ Both Redis nodes run with AOF persistence (`--appendonly yes`) and Docker volume
 
 ### Write path: write-behind batching
 1. `POST /api/v1/vote/{poll_id}` only increments a counter in an in-memory buffer. There is no Redis call on the request path.
-2. The vote also invalidates that poll's cached results.
-3. A background task, started when the app starts, runs every 10 seconds (`BATCH_INTERVAL_SECONDS`). For each buffered poll it:
+2. A background task, started when the app starts, runs every 10 seconds (`BATCH_INTERVAL_SECONDS`). For each buffered poll it:
    - finds the poll's Redis node on the hash ring,
    - runs `HINCRBY poll:{poll_id} {option} {count}`,
    - clears the buffer.

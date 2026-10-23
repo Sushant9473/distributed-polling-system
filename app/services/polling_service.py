@@ -28,10 +28,6 @@ class PollingService:
         # Buffer votes in memory (Task 4 - Batching)
         # This also serves Task 1 (in-memory storage)
         self._memory_storage[poll_id][option_id] += 1
-        
-        # Invalidate app cache for this poll when a vote is cast
-        if poll_id in self._app_cache:
-            del self._app_cache[poll_id]
 
     async def get_results(self, poll_id: str) -> Dict[str, int]:
         """
